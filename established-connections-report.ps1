@@ -8,18 +8,17 @@ function Resolve-IpToName {
 
   $name = $null
   try {
-    # Fast path for loopback
     if ($Ip -in @('127.0.0.1','::1')) {
       $name = 'localhost'
     } else {
-      # Prefer PTR via Resolve-DnsName
+      # Prefer PTR record
       $ans = Resolve-DnsName -Name $Ip -Type PTR -ErrorAction Stop
       $ptr = ($ans | Where-Object { $_.Type -eq 'PTR' } | Select-Object -First 1).NameHost
       if ($ptr) { $name = $ptr.TrimEnd('.') }
     }
   } catch { }
 
-  # Fallback to .NET if PTR failed
+  # Fallback to .NET if PTR fails
   if (-not $name) {
     try {
       $entry = [System.Net.Dns]::GetHostEntry($Ip)
@@ -27,8 +26,7 @@ function Resolve-IpToName {
     } catch { }
   }
 
-  if (-not $name) { $name = $Ip }  # final fallback: keep IP
-
+  if (-not $name) { $name = $Ip }   # final fallback
   $DnsCache[$Ip] = $name
   return $name
 }
@@ -36,32 +34,39 @@ function Resolve-IpToName {
 # --- Main query ---------------------------------------------------------------
 Get-NetTCPConnection -State Established |
   ForEach-Object {
-    # Best-effort resolve owning process; if it fails, keep the PID
     $p = $null
     try { $p = Get-Process -Id $_.OwningProcess -ErrorAction Stop } catch {}
 
     [pscustomobject]@{
-      LocalAddress   = $_.LocalAddress
-      LocalPort      = $_.LocalPort
-      RemoteAddress  = $_.RemoteAddress
-      RemotePort     = $_.RemotePort
-      PID            = $_.OwningProcess
-      Process        = if ($p) { $p.ProcessName } else { "PID:$($_.OwningProcess)" }
+      LocalAddress  = $_.LocalAddress
+      LocalPort     = $_.LocalPort
+      RemoteAddress = $_.RemoteAddress
+      RemotePort    = $_.RemotePort
+      PID           = $_.OwningProcess
+      Process       = if ($p) { $p.ProcessName } else { "PID:$($_.OwningProcess)" }
     }
   } |
   Group-Object RemoteAddress |
   Sort-Object Count -Descending |
-  Select-Object `
-    @{n='Count';e={$_.Count}},
-    # Show "hostname (ip)" if a name exists; otherwise just the IP
-    @{n='Remote';e={
-        $ip = $_.Name
-        $resolved = Resolve-IpToName -Ip $ip
-        if ($resolved -ne $ip) { "$resolved ($ip)" } else { $ip }
-      }},
-    @{n='LocalEndpoints';e={
-        ($_.Group | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" } |
-          Sort-Object | Get-Unique) -join ', '
-      }},
-    @{n='Processes';e={ ($_.Group.Process | Sort-Object | Get-Unique) -join ', ' }} |
-  Format-Table -AutoSize
+  Select-Object @(
+    @{ Name = 'Count';  Expression = { $_.Count } }
+    @{ Name = 'Remote'; Expression = {
+         $ip = $_.Name
+         $resolved = Resolve-IpToName -Ip $ip
+         if ($resolved -ne $ip) { "$resolved ($ip)" } else { $ip }
+       }
+    }
+    @{ Name = 'RemotePorts'; Expression = {
+         ($_.Group.RemotePort | Sort-Object | Get-Unique) -join ', '
+       }
+    }
+    @{ Name = 'LocalEndpoints'; Expression = {
+         ($_.Group | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" } |
+           Sort-Object | Get-Unique) -join ', '
+       }
+    }
+    @{ Name = 'Processes'; Expression = {
+         ($_.Group.Process | Sort-Object | Get-Unique) -join ', '
+       }
+    }
+  ) | Format-Table -AutoSize
